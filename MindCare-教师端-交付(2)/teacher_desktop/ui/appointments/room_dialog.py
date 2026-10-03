@@ -8,13 +8,43 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLineEdit,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from desktop_common.widgets import make_hint, make_label
+
+
+class _DialogHeader(QFrame):
+    """可拖拽的弹窗头部：按住标题/说明区域拖动即可移动整个弹窗。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("DialogHeader")
+        self.setCursor(Qt.SizeAllCursor)
+        self._drag_offset: Optional[QPoint] = None
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = (event.globalPosition().toPoint()
+                                 - self.window().frameGeometry().topLeft())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_offset is not None and (event.buttons() & Qt.LeftButton):
+            self.window().move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
 
 
 class _RoomRow:
@@ -61,6 +91,10 @@ class RoomManageDialog(QDialog):
         self.setWindowTitle("咨询室管理")
         self.setModal(True)
         self.setMinimumWidth(520)
+        # 高度自适应：不超过屏幕可用高度 80%，防止底部（新增区 / 按钮）溢出视口
+        avail_h = QGuiApplication.primaryScreen().availableGeometry().height()
+        self.setMaximumHeight(int(avail_h * 0.8))
+        self.setSizeGripEnabled(True)   # 右下角调整大小手柄（支持缩放）
 
         self._rows: List[_RoomRow] = []
         self._new_rooms: List[Dict[str, Optional[str]]] = []
@@ -68,12 +102,33 @@ class RoomManageDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(12)
-        layout.addWidget(make_label("管理可预约的咨询室", "CardTitle", word_wrap=False))
-        layout.addWidget(make_hint("记录名称、位置与特点；改动在点「保存」后写入"))
 
-        self._list_box = QVBoxLayout()
+        # 可拖拽头部：按住标题/说明区域拖动即可移动整个弹窗
+        header = _DialogHeader(self)
+        header_box = QVBoxLayout(header)
+        header_box.setContentsMargins(0, 0, 0, 8)
+        header_box.setSpacing(2)
+        title = make_label("管理可预约的咨询室", "CardTitle", word_wrap=False)
+        title.setAttribute(Qt.WA_TransparentForMouseEvents)
+        hint = make_hint("记录名称、位置与特点；改动在点「保存」后写入")
+        hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        header_box.addWidget(title)
+        header_box.addWidget(hint)
+        layout.addWidget(header)
+
+        # 咨询室列表放进滚动区（overflow-y: auto），内容多时内部纵向滚动
+        self._list_container = QWidget()
+        self._list_box = QVBoxLayout(self._list_container)
+        self._list_box.setContentsMargins(0, 0, 0, 0)
         self._list_box.setSpacing(8)
-        layout.addLayout(self._list_box)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setWidget(self._list_container)
+        layout.addWidget(self._scroll, 1)
         self._rebuild_rows(rooms)
 
         # ---- 新增区
@@ -126,6 +181,7 @@ class RoomManageDialog(QDialog):
 
     def _make_row(self, room: dict) -> QFrame:
         r = _RoomRow(room)
+        self._rows.append(r)   # 登记行对象：否则 updates/deletes 遍历空列表，保存不生效
         frame = QFrame()
         frame.setObjectName("Panel")
         lay = QVBoxLayout(frame)
@@ -149,7 +205,6 @@ class RoomManageDialog(QDialog):
         bottom.addWidget(r.features_edit, 1)
         lay.addLayout(bottom)
 
-        self._list_box.addWidget(frame)
         return frame
 
     def _mark_deleted(self, row: _RoomRow, frame: QFrame) -> None:
